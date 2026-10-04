@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lovstudio-skill-helper"
-version = "0.9.4"
-description = "Lovstudio skill helper — decrypt paid Skills after account or legacy entitlement verification. Decryption keys never touch disk."
+version = "0.10.0"
+description = "Lovstudio skill helper — activate and manage Lovstudio license keys and call cloud-split Skill handlers."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
@@ -19,7 +19,6 @@ classifiers = [
   "Programming Language :: Python :: 3 :: Only",
 ]
 dependencies = [
-  "cryptography>=42",
   "pyyaml>=6",
 ]
 

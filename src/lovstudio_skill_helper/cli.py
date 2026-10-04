@@ -1,24 +1,20 @@
-"""lovstudio-skill-helper CLI — activate, heartbeat, decrypt, exec.
+"""lovstudio-skill-helper CLI — license activation, heartbeat, and cloud-split calls.
+
+Paid Skills install as plain source after the account's entitlement is
+checked by lovstudio.ai, so this helper no longer decrypts anything.
 
 Trust model:
   - ~/.lovstudio/license.yml holds license_key (chmod 600). Anyone with this
     file can impersonate the user. Don't share.
-  - Decryption keys are fetched from the server per invocation, used in
-    memory, then die with the process. They are NEVER written to disk.
-  - `exec` decrypts a script to a tmpdir, runs it, then deletes the tmpdir.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import subprocess
 import sys
-import tempfile
-from pathlib import Path
 
 from . import api, auth, completion, config
-from .crypto import SkillManifest, decrypt_file
 
 
 _BUY_HINT = "  前往 https://lovstudio.ai 购买 license key，或关注 #公众号：手工川 购买。"
@@ -292,196 +288,6 @@ def cmd_deactivate(args) -> int:
         return 0
     print(f"error: no local license matches lk-{key[:6]}…", file=sys.stderr)
     return 1
-
-
-def _manifest_for(skill_name: str) -> SkillManifest:
-    d = config.skill_dir(skill_name)
-    if not (d / "MANIFEST.enc.json").exists():
-        candidates = config.skill_dir_candidates(skill_name)
-        print(f"error: skill '{skill_name}' not installed (no MANIFEST.enc.json found).", file=sys.stderr)
-        print(f"  searched, in order:", file=sys.stderr)
-        for c in candidates:
-            mark = "✓" if (c / "MANIFEST.enc.json").exists() else "✗"
-            print(f"    {mark} {c}", file=sys.stderr)
-        print(f"  install via either:", file=sys.stderr)
-        print(f"    npx lovstudio skills add {skill_name}   # 登录并兑换后安装", file=sys.stderr)
-        sys.exit(2)
-    return SkillManifest(d)
-
-
-def _read_skill_version(manifest: SkillManifest) -> str:
-    """Version is baked into MANIFEST.enc.json (format v2+)."""
-    if manifest.skill_version:
-        return manifest.skill_version
-    raise RuntimeError(
-        f"manifest at {manifest.skill_dir} has no skill_version field. "
-        "Re-pack with pack-skill.py --skill-version <semver>."
-    )
-
-
-def _fetch_key(skill_name: str, version: str) -> bytes:
-    """Fetch the AES key for `skill_name` through account or license access.
-
-    Strategy:
-      1. Prefer the signed-in account entitlement created by a Credits purchase.
-      2. Fall back to every stacked license for legacy license-key users.
-      3. If none advertise it, still try each license — the server is authoritative
-         and the local cache may be stale after an admin top-up without heartbeat.
-      4. Only explicit entitlement denials prompt the user to add another key.
-    """
-    try:
-        session = auth.refresh_if_needed()
-        try:
-            resp = api.account_skill_key(session["access_token"], skill_name, version)
-            return bytes.fromhex(resp["decryption_key"])
-        except api.ApiError as e:
-            # A signed-in account without this entitlement can still have a
-            # legacy license key on the same machine. Continue to that path.
-            if (e.status, e.code) not in {
-                (401, "unauthorized"), (401, "bearer_required"),
-                (403, "skill_not_owned"),
-            }:
-                print(f"error: account skill key failed — {e.message}", file=sys.stderr)
-                sys.exit(1)
-    except auth.AuthError:
-        pass
-
-    did = config.device_id()
-    licenses = config.load_licenses()
-    if not licenses:
-        print(f"error: no access to '{skill_name}'.", file=sys.stderr)
-        print(f"  sign in and redeem it first: npx lovstudio skills add {skill_name}", file=sys.stderr)
-        sys.exit(1)
-
-    tried: set[str] = set()
-    # Fast path: any key that already advertises this skill locally.
-    preferred = _pick_license_for(skill_name, licenses)
-    candidates: list[dict] = []
-    if preferred is not None:
-        candidates.append(preferred)
-    # Then every other key — catches the "admin just topped up, no heartbeat yet" case.
-    for lic in licenses:
-        if lic["license_key"] not in {c["license_key"] for c in candidates}:
-            candidates.append(lic)
-
-    last_err: api.ApiError | None = None
-    for lic in candidates:
-        if lic["license_key"] in tried:
-            continue
-        tried.add(lic["license_key"])
-        try:
-            resp = api.skill_keys(lic["license_key"], did, skill_name, version)
-        except api.ApiError as e:
-            last_err = e
-            # A 403 may come from website protection before auth ever runs.
-            if e.status == 403 and e.code in {
-                "not entitled to this skill", "license revoked", "license expired",
-            }:
-                continue
-            print(f"error: skill_keys failed — {e.message}", file=sys.stderr)
-            sys.exit(1)
-        return bytes.fromhex(resp["decryption_key"])
-
-    # Every stacked key explicitly denied access. Offer a recovery path.
-    if last_err and last_err.status in (401, 403) and sys.stdin.isatty():
-        new_key = _prompt_not_entitled(skill_name)
-        if new_key is None:
-            sys.exit(1)
-        if _activate_and_stack(new_key) != 0:
-            sys.exit(1)
-        # Retry once with the freshly-stacked license.
-        return _fetch_key(skill_name, version)
-
-    print(f"error: no activated license covers '{skill_name}'.", file=sys.stderr)
-    print(_BUY_HINT, file=sys.stderr)
-    sys.exit(1)
-
-
-def _prompt_not_entitled(skill_name: str) -> str | None:
-    """Ask the user how to resolve a missing entitlement. Returns a new license key or None."""
-    import webbrowser
-
-    buy_url = f"https://lovstudio.ai/skills/{skill_name}"
-    print(f"", file=sys.stderr)
-    print(f"You don't have access to '{skill_name}' yet.", file=sys.stderr)
-    print(f"  [1] enter a different license key", file=sys.stderr)
-    print(f"  [2] open purchase page ({buy_url})", file=sys.stderr)
-    print(f"  [3] cancel", file=sys.stderr)
-    try:
-        choice = input("choose [1/2/3]: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print("", file=sys.stderr)
-        return None
-    if choice == "1":
-        try:
-            return input("license key (lk-...): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("", file=sys.stderr)
-            return None
-    if choice == "2":
-        try:
-            webbrowser.open(buy_url)
-        except Exception:
-            pass
-        print(f"→ opened {buy_url} — complete purchase, then re-run your command.", file=sys.stderr)
-    return None
-
-
-def _activate_and_stack(license_key: str) -> int:
-    """Activate `license_key` and stack it alongside existing keys. Returns exit code."""
-    ns = argparse.Namespace(key=license_key, no_login=False)
-    return cmd_activate(ns)
-
-
-def cmd_decrypt(args) -> int:
-    """Print a decrypted file to stdout. Defaults to SKILL.md — what Claude first reads.
-
-    Pass a second positional arg (e.g. `references/workflow.md`) to decrypt any
-    other file declared in the skill's MANIFEST. The path must match exactly
-    what `pack_dir` recorded (relative to src/, forward slashes).
-    """
-    manifest = _manifest_for(args.skill_name)
-    version = _read_skill_version(manifest)
-    canonical_name = manifest.skill_name or args.skill_name
-    key = _fetch_key(canonical_name, version)
-    rel = args.rel_path or "SKILL.md"
-    if rel not in manifest.files:
-        print(f"error: '{rel}' not in manifest for '{args.skill_name}'.", file=sys.stderr)
-        print(f"       available files: {', '.join(sorted(manifest.files))}", file=sys.stderr)
-        return 2
-    plaintext = decrypt_file(manifest, rel, key)
-    sys.stdout.buffer.write(plaintext)
-    return 0
-
-
-def cmd_exec(args) -> int:
-    """Decrypt a script file to a tmpdir, execute it, then clean up."""
-    manifest = _manifest_for(args.skill_name)
-    version = _read_skill_version(manifest)
-    canonical_name = manifest.skill_name or args.skill_name
-    key = _fetch_key(canonical_name, version)
-
-    if args.script_path not in manifest.files:
-        print(f"error: '{args.script_path}' not in manifest.", file=sys.stderr)
-        return 2
-    plaintext = decrypt_file(manifest, args.script_path, key)
-
-    with tempfile.TemporaryDirectory(prefix="lovstudio-") as tmp:
-        tmp_path = Path(tmp) / Path(args.script_path).name
-        tmp_path.write_bytes(plaintext)
-        tmp_path.chmod(0o700)
-
-        # Pick interpreter from extension. KISS — extend when needed.
-        suffix = tmp_path.suffix
-        if suffix == ".py":
-            cmd = [sys.executable, str(tmp_path), *args.script_args]
-        elif suffix == ".sh":
-            cmd = ["bash", str(tmp_path), *args.script_args]
-        else:
-            cmd = [str(tmp_path), *args.script_args]
-
-        result = subprocess.run(cmd)
-        return result.returncode
 
 
 def cmd_call(args) -> int:
@@ -863,20 +669,6 @@ def main(argv: list[str] | None = None) -> int:
                          help="wipe every stacked license from this machine")
     p_deact.set_defaults(func=cmd_deactivate)
 
-    p_dec = sub.add_parser("decrypt",
-                           help="print a decrypted skill file to stdout (defaults to SKILL.md)")
-    p_dec.add_argument("skill_name")
-    p_dec.add_argument("rel_path", nargs="?", default=None,
-                       help="optional: path inside the skill (e.g. references/workflow.md). "
-                            "omit to decrypt SKILL.md")
-    p_dec.set_defaults(func=cmd_decrypt)
-
-    p_exec = sub.add_parser("exec", help="run a decrypted script from a skill")
-    p_exec.add_argument("skill_name")
-    p_exec.add_argument("script_path", help="relative path inside the skill, e.g. scripts/foo.py")
-    p_exec.add_argument("script_args", nargs=argparse.REMAINDER)
-    p_exec.set_defaults(func=cmd_exec)
-
     p_call = sub.add_parser("call", help="invoke a cloud-split skill's server-side handler")
     p_call.add_argument("skill_name")
     p_call.add_argument("--op", required=True, help="handler operation, e.g. `evaluate`")
@@ -936,12 +728,6 @@ def main(argv: list[str] | None = None) -> int:
     p_arl.set_defaults(func=cmd_admin_revoke_license)
 
     # Hidden helpers used by the completion scripts themselves.
-    p_cs = sub.add_parser("_complete-skills", help=argparse.SUPPRESS)
-    p_cs.set_defaults(func=completion.cmd_complete_skills)
-
-    p_csf = sub.add_parser("_complete-skill-files", help=argparse.SUPPRESS)
-    p_csf.add_argument("skill_name")
-    p_csf.set_defaults(func=completion.cmd_complete_skill_files)
 
     args = p.parse_args(argv)
     return args.func(args)

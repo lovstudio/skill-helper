@@ -6,13 +6,6 @@
                                    #   licenses: [ { license_key, user_id, expires_at,
                                    #                 entitled_skills, last_heartbeat_at }, … ]
                                    # Legacy v1 (flat single license) is auto-migrated on read.
-
-Encrypted skill bundles normally live under the installer-owned canonical
-directory `~/.agents/skills/<runtime-name>/`, with optional Agent-specific
-copies or links such as `~/.codex/skills/` and `~/.claude/skills/`.
-
-Decryption keys are NEVER persisted here. They live in the running CLI's
-memory for the duration of one `decrypt` or `exec` invocation, then die.
 """
 from __future__ import annotations
 
@@ -20,7 +13,6 @@ import os
 import platform
 import uuid
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
@@ -182,95 +174,3 @@ def device_info() -> dict:
         "hostname": platform.node(),
         "python": platform.python_version(),
     }
-
-
-def _skill_name_candidates(skill_name: str) -> list[str]:
-    """Return current runtime, product, and legacy directory-name aliases."""
-    raw = skill_name.strip()
-    if raw.startswith("lov-"):
-        product = raw[len("lov-"):]
-    elif raw.startswith("lovstudio-"):
-        product = raw[len("lovstudio-"):]
-    elif raw.startswith("lovstudio:"):
-        product = raw[len("lovstudio:"):]
-    else:
-        product = raw
-
-    ordered = [f"lov-{product}", product, f"lovstudio-{product}", f"lovstudio:{product}"]
-    if raw not in ordered:
-        ordered.insert(0, raw)
-    return list(dict.fromkeys(name for name in ordered if name))
-
-
-def skill_roots(home: Optional[Path] = None) -> list[Path]:
-    """Installer canonical root first, followed by known Agent-specific roots."""
-    root = home or Path.home()
-    return [
-        root / ".agents" / "skills",
-        root / ".codex" / "skills",
-        root / ".claude" / "skills",
-        root / ".config" / "opencode" / "skills",
-        root / ".gemini" / "skills",
-        root / ".cursor" / "skills",
-        root / ".windsurf" / "skills",
-    ]
-
-
-def skill_dir_candidates(skill_name: str, home: Optional[Path] = None) -> list[Path]:
-    """Search current installer and legacy Agent locations in priority order."""
-    names = _skill_name_candidates(skill_name)
-    return [root / name for root in skill_roots(home) for name in names]
-
-
-def skill_dir(skill_name: str, home: Optional[Path] = None) -> Path:
-    """Locate an encrypted skill bundle, returning the first candidate that
-    contains a MANIFEST.enc.json. Falls back to the primary path so callers
-    can render a sane error message.
-    """
-    for c in skill_dir_candidates(skill_name, home):
-        if (c / "MANIFEST.enc.json").exists():
-            return c
-    return skill_dir_candidates(skill_name, home)[0]
-
-
-def installed_skills(home: Optional[Path] = None) -> list[str]:
-    """List canonical product names from encrypted manifests across Agent roots."""
-    import json
-
-    names: set[str] = set()
-    for root in skill_roots(home):
-        if not root.is_dir():
-            continue
-        for child in root.iterdir():
-            manifest = child / "MANIFEST.enc.json"
-            if not child.is_dir() or not manifest.exists():
-                continue
-            try:
-                data = json.loads(manifest.read_text())
-            except Exception:
-                data = {}
-            canonical = str(data.get("skill_name") or "").strip()
-            if not canonical:
-                canonical = _skill_name_candidates(child.name)[1]
-            names.add(canonical)
-    return sorted(names)
-
-
-def list_skill_files(skill_name: str) -> list[str]:
-    """List relative paths inside an installed skill's MANIFEST. Empty list on
-    any error — this is only used for shell completion, never hard-fails.
-    """
-    import json
-
-    d = skill_dir(skill_name)
-    manifest_path = d / "MANIFEST.enc.json"
-    if not manifest_path.exists():
-        return []
-    try:
-        data = json.loads(manifest_path.read_text())
-    except Exception:
-        return []
-    files = data.get("files")
-    if not isinstance(files, dict):
-        return []
-    return sorted(files.keys())

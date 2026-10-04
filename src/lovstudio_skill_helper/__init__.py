@@ -1,4 +1,4 @@
-"""lovstudio-skill-helper — activate and run paid Lovstudio skills locally."""
+"""lovstudio-skill-helper — manage Lovstudio license keys on this machine."""
 from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version as _pkg_version

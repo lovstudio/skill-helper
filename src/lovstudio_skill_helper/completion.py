@@ -3,9 +3,6 @@
 Design choices:
   - Completion scripts are STATIC (hardcoded subcommands) so shell startup
     doesn't pay any Python-import cost.
-  - Dynamic parts (skill names, script paths inside a skill) are fetched via
-    hidden subcommands `_complete-skills` / `_complete-skill-files` which do
-    cheap filesystem scans and print one candidate per line.
   - `lovstudio-skill-helper completion install` writes a single line to the
     user's shell rc file; no multi-step setup.
 """
@@ -26,7 +23,7 @@ _lovstudio_skill_helper() {
         cword=$COMP_CWORD
     }
 
-    local subcommands="activate heartbeat status deactivate decrypt exec completion"
+    local subcommands="activate heartbeat status deactivate call completion"
 
     # Top-level subcommand.
     if [[ $cword -eq 1 ]]; then
@@ -38,28 +35,6 @@ _lovstudio_skill_helper() {
     case "$sub" in
         status)
             COMPREPLY=($(compgen -W "--json" -- "$cur"))
-            ;;
-        decrypt)
-            if [[ $cword -eq 2 ]]; then
-                local skills
-                skills=$(lovstudio-skill-helper _complete-skills 2>/dev/null)
-                COMPREPLY=($(compgen -W "$skills" -- "$cur"))
-            elif [[ $cword -eq 3 ]]; then
-                local files
-                files=$(lovstudio-skill-helper _complete-skill-files "${words[2]}" 2>/dev/null)
-                COMPREPLY=($(compgen -W "$files" -- "$cur"))
-            fi
-            ;;
-        exec)
-            if [[ $cword -eq 2 ]]; then
-                local skills
-                skills=$(lovstudio-skill-helper _complete-skills 2>/dev/null)
-                COMPREPLY=($(compgen -W "$skills" -- "$cur"))
-            elif [[ $cword -eq 3 ]]; then
-                local files
-                files=$(lovstudio-skill-helper _complete-skill-files "${words[2]}" 2>/dev/null)
-                COMPREPLY=($(compgen -W "$files" -- "$cur"))
-            fi
             ;;
         completion)
             if [[ $cword -eq 2 ]]; then
@@ -85,8 +60,7 @@ _lovstudio_skill_helper() {
         'heartbeat:send heartbeat to refresh license'
         'status:show local license state'
         'deactivate:wipe local license file'
-        'decrypt:print a decrypted skill file to stdout (defaults to SKILL.md)'
-        'exec:run a decrypted script from a skill'
+        'call:invoke a cloud-split skill handler'
         'completion:install / print shell completion'
     )
 
@@ -102,28 +76,6 @@ _lovstudio_skill_helper() {
             case $line[1] in
                 status)
                     _arguments '--json[raw JSON output]'
-                    ;;
-                decrypt)
-                    if (( CURRENT == 2 )); then
-                        local -a skills
-                        skills=(${(f)"$(lovstudio-skill-helper _complete-skills 2>/dev/null)"})
-                        _describe -t skills 'skill' skills
-                    elif (( CURRENT == 3 )); then
-                        local -a files
-                        files=(${(f)"$(lovstudio-skill-helper _complete-skill-files $line[2] 2>/dev/null)"})
-                        _describe -t files 'file' files
-                    fi
-                    ;;
-                exec)
-                    if (( CURRENT == 2 )); then
-                        local -a skills
-                        skills=(${(f)"$(lovstudio-skill-helper _complete-skills 2>/dev/null)"})
-                        _describe -t skills 'skill' skills
-                    elif (( CURRENT == 3 )); then
-                        local -a files
-                        files=(${(f)"$(lovstudio-skill-helper _complete-skill-files $line[2] 2>/dev/null)"})
-                        _describe -t files 'script' files
-                    fi
                     ;;
                 completion)
                     _arguments \
@@ -216,19 +168,3 @@ def cmd_completion(args) -> int:
         return 0
     print("error: expected `install`, `bash`, or `zsh`.", file=sys.stderr)
     return 2
-
-
-def cmd_complete_skills(args) -> int:
-    from . import config
-
-    for name in config.installed_skills():
-        print(name)
-    return 0
-
-
-def cmd_complete_skill_files(args) -> int:
-    from . import config
-
-    for path in config.list_skill_files(args.skill_name):
-        print(path)
-    return 0
